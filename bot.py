@@ -1049,7 +1049,7 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(f"^{ABTN_CODES}$") & admin_only, admin_open_codes))
     app.add_handler(MessageHandler(filters.Regex(f"^{ABTN_STUDENTS}$") & admin_only, admin_open_students))
     app.add_handler(CallbackQueryHandler(on_studpage, pattern="^studpage:"))
-app.add_handler(MessageHandler(filters.Regex(f"^{ABTN_BROADCAST}$") & admin_only, admin_open_broadcast))
+    app.add_handler(MessageHandler(filters.Regex(f"^{ABTN_BROADCAST}$") & admin_only, admin_open_broadcast))
     app.add_handler(MessageHandler(filters.Regex(f"^{ABTN_BACK_MAIN}$") & admin_only, admin_back_main))
 
     # زیرمنوی کدها
