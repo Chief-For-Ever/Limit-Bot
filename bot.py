@@ -1,9 +1,8 @@
-import json
 import logging
 import sqlite3
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
+    ReplyKeyboardMarkup, KeyboardButton
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
@@ -12,14 +11,16 @@ from telegram.ext import (
 
 # ============ تنظیمات (اینا رو پر کن) ============
 BOT_TOKEN = "8753659672:AAH0tHsxH3YAG6Ogf8aJUTzGfIzS5e6gSow"          # از BotFather گرفتی
-ADMIN_CHAT_ID = 1252988484             # آیدی عددی تلگرام خودت (از @userinfobot بگیر)
-PANEL_URL = "https://chief-for-ever.github.io/Limit-panel/"   # لینک limit-panel که تو گیت‌هاب پیجز گرفتی
+ADMIN_CHAT_ID = 1252988484             # آیدی عددی تلگرام خودت
 # ==================================================
 
 logging.basicConfig(level=logging.INFO)
 
-# دانش‌آموزهایی که الان منتظرن پیامشون رو بفرستن
-awaiting_message = set()
+BTN_PANEL = "🪪 پنل کاربری"
+BTN_MESSAGE = "💬 ارسال پیام"
+
+# وضعیت فعلی هر کاربر: None / 'awaiting_code' / 'awaiting_message'
+user_state = {}
 
 # نگاشت: آیدی پیام فوروارد شده تو چت ادمین -> chat_id دانش‌آموز
 forward_map = {}
@@ -44,50 +45,39 @@ def init_db():
     conn.close()
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = ReplyKeyboardMarkup(
-        [[KeyboardButton(text="📋 باز کردن پنل", web_app=WebAppInfo(url=PANEL_URL))]],
+def main_menu():
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton(text=BTN_PANEL), KeyboardButton(text=BTN_MESSAGE)]],
         resize_keyboard=True
     )
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_state.pop(update.effective_chat.id, None)
     await update.message.reply_text(
         "به بات گروه آموزشی حد خوش اومدی 🛡\n"
-        "با دکمه پایین صفحه، پنل رو باز کن.",
-        reply_markup=keyboard
+        "یکی از گزینه‌های پایین صفحه رو انتخاب کن.",
+        reply_markup=main_menu()
     )
 
 
-async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """وقتی کاربر تو Mini App روی یکی از دکمه‌ها می‌زنه، این هندلر صدا زده میشه."""
+async def on_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    raw = update.effective_message.web_app_data.data
+    user_state[chat_id] = "awaiting_code"
+    await update.message.reply_text(
+        "🪪 کد اختصاصی‌ای که در اختیارت قرار گرفته رو بفرست."
+    )
 
-    try:
-        payload = json.loads(raw)
-    except Exception:
-        payload = {}
 
-    action = payload.get("action")
-
-    if action == "start_message":
-        awaiting_message.add(chat_id)
-        await update.message.reply_text(
-            "✍️ پیامت رو بفرست، مستقیم برای ستاد ارسال میشه."
-        )
-
-    elif action == "submit_code":
-        code = (payload.get("code") or "").strip()
-        await process_code(update, context, chat_id, code)
-
-    else:
-        await update.message.reply_text("متوجه نشدم، دوباره از پنل امتحان کن.")
+async def on_message_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_state[chat_id] = "awaiting_message"
+    await update.message.reply_text(
+        "✍️ پیامت رو بفرست، مستقیم برای ستاد ارسال میشه."
+    )
 
 
 async def process_code(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, code: str):
-    """بررسی کد وارد شده و در صورت معتبر بودن، ثبت دانش‌آموز و ارسال محتوا."""
-    if not code:
-        await update.message.reply_text("کد وارد نشده.")
-        return
-
     conn = sqlite3.connect("students.db")
     cur = conn.cursor()
     cur.execute("SELECT content FROM codes WHERE code = ?", (code,))
@@ -109,58 +99,7 @@ async def process_code(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_
     await update.message.reply_text(f"✅ کد تأیید شد، خوش اومدی!\n\n{content}")
 
 
-async def add_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """فقط ادمین: ثبت یه کد جدید و محتوای مرتبط با اون. مثال: /addcode BIO101 لینک محتوا"""
-    if update.effective_chat.id != ADMIN_CHAT_ID:
-        return
-
-    if not context.args or len(context.args) < 2:
-        await update.message.reply_text("فرمت درست:\n/addcode کد محتوا-یا-لینک")
-        return
-
-    code = context.args[0]
-    content = " ".join(context.args[1:])
-
-    conn = sqlite3.connect("students.db")
-    conn.execute("INSERT OR REPLACE INTO codes (code, content) VALUES (?, ?)", (code, content))
-    conn.commit()
-    conn.close()
-
-    await update.message.reply_text(f"کد «{code}» ثبت شد ✅")
-
-
-async def list_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """فقط ادمین: نمایش همه کدهای ثبت‌شده."""
-    if update.effective_chat.id != ADMIN_CHAT_ID:
-        return
-
-    conn = sqlite3.connect("students.db")
-    rows = conn.execute("SELECT code, content FROM codes").fetchall()
-    conn.close()
-
-    if not rows:
-        await update.message.reply_text("هیچ کدی ثبت نشده.")
-        return
-
-    text = "\n".join([f"• {c} → {t[:40]}" for c, t in rows])
-    await update.message.reply_text(text)
-
-
-async def handle_student_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پیام متنی دانش‌آموزها. اگه منتظر ارسال بود، فوروارد میشه به ادمین."""
-    chat_id = update.effective_chat.id
-
-    if chat_id == ADMIN_CHAT_ID:
-        return  # پیام‌های خود ادمین از این تابع رد نمیشه
-
-    if chat_id not in awaiting_message:
-        await update.message.reply_text(
-            "برای ارسال پیام، اول از منو روی «ارسال پیام» بزن."
-        )
-        return
-
-    awaiting_message.discard(chat_id)
-
+async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     user = update.effective_user
     name = user.full_name or user.username or "ناشناس"
 
@@ -177,34 +116,75 @@ async def handle_student_text(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
     forward_map[sent.message_id] = chat_id
-
     await update.message.reply_text("پیامت ارسال شد ✅ منتظر جواب باش.")
 
 
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """همه پیام‌های متنی که دکمه منو نیستن، از اینجا رد میشن."""
+    chat_id = update.effective_chat.id
+
+    # پاسخ ادمین به یه پیام فوروارد شده (ریپلای)
+    if chat_id == ADMIN_CHAT_ID and update.message.reply_to_message:
+        replied_id = update.message.reply_to_message.message_id
+        if replied_id in forward_map:
+            student_chat_id = forward_map[replied_id]
+            await context.bot.send_message(chat_id=student_chat_id, text=update.message.text)
+            return
+
+    if chat_id == ADMIN_CHAT_ID:
+        return
+
+    state = user_state.get(chat_id)
+
+    if state == "awaiting_code":
+        user_state.pop(chat_id, None)
+        await process_code(update, context, chat_id, update.message.text.strip())
+
+    elif state == "awaiting_message":
+        user_state.pop(chat_id, None)
+        await forward_to_admin(update, context, chat_id)
+
+    else:
+        await update.message.reply_text(
+            "برای شروع، یکی از گزینه‌های پایین صفحه رو بزن.",
+            reply_markup=main_menu()
+        )
+
+
 async def handle_seen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """وقتی ادمین روی دکمه «دیدم» می‌زنه."""
     query = update.callback_query
     await query.answer()
-
     student_chat_id = int(query.data.split(":")[1])
-    await context.bot.send_message(
-        chat_id=student_chat_id,
-        text="پیامت دیده شد 👁"
-    )
+    await context.bot.send_message(chat_id=student_chat_id, text="پیامت دیده شد 👁")
     await query.edit_message_reply_markup(reply_markup=None)
 
 
-async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """وقتی ادمین روی یکی از پیام‌های فوروارد شده ریپلای می‌زنه، برای همون دانش‌آموز میره."""
-    replied = update.message.reply_to_message
-    if not replied or replied.message_id not in forward_map:
+async def add_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_CHAT_ID:
         return
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text("فرمت درست:\n/addcode کد محتوا-یا-لینک")
+        return
+    code = context.args[0]
+    content = " ".join(context.args[1:])
+    conn = sqlite3.connect("students.db")
+    conn.execute("INSERT OR REPLACE INTO codes (code, content) VALUES (?, ?)", (code, content))
+    conn.commit()
+    conn.close()
+    await update.message.reply_text(f"کد «{code}» ثبت شد ✅")
 
-    student_chat_id = forward_map[replied.message_id]
-    await context.bot.send_message(
-        chat_id=student_chat_id,
-        text=update.message.text
-    )
+
+async def list_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_CHAT_ID:
+        return
+    conn = sqlite3.connect("students.db")
+    rows = conn.execute("SELECT code, content FROM codes").fetchall()
+    conn.close()
+    if not rows:
+        await update.message.reply_text("هیچ کدی ثبت نشده.")
+        return
+    text = "\n".join([f"• {c} → {t[:40]}" for c, t in rows])
+    await update.message.reply_text(text)
 
 
 def main():
@@ -214,20 +194,11 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("addcode", add_code))
     app.add_handler(CommandHandler("codes", list_codes))
-    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data))
     app.add_handler(CallbackQueryHandler(handle_seen, pattern="^seen:"))
 
-    # ریپلای ادمین به پیام‌های فوروارد شده
-    app.add_handler(MessageHandler(
-        filters.REPLY & filters.User(ADMIN_CHAT_ID) & filters.TEXT,
-        handle_admin_reply
-    ))
-
-    # پیام معمولی دانش‌آموزها
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        handle_student_text
-    ))
+    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_PANEL}$"), on_panel_button))
+    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_MESSAGE}$"), on_message_button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     print("بات روشن شد...")
     app.run_polling()
