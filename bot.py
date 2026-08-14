@@ -19,8 +19,11 @@ logging.basicConfig(level=logging.INFO)
 BTN_PANEL = "🪪 پنل کاربری"
 BTN_MESSAGE = "💬 ارسال پیام"
 
-# وضعیت فعلی هر کاربر: None / 'awaiting_code' / 'awaiting_message'
+# وضعیت فعلی هر کاربر عادی: None / 'awaiting_code' / 'awaiting_message'
 user_state = {}
+
+# وضعیت آپلود ادمین: None یا ('video'|'jozve', code)
+admin_upload_state = {"pending": None}
 
 # نگاشت: آیدی پیام فوروارد شده تو چت ادمین -> chat_id دانش‌آموز
 forward_map = {}
@@ -30,15 +33,18 @@ def init_db():
     conn = sqlite3.connect("students.db")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS students (
-            code TEXT PRIMARY KEY,
-            telegram_id INTEGER,
+            telegram_id INTEGER PRIMARY KEY,
+            code TEXT,
             registered_at TEXT
         )
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS codes (
             code TEXT PRIMARY KEY,
-            content TEXT
+            video_file_id TEXT,
+            video_type TEXT,
+            jozve_file_id TEXT,
+            jozve_type TEXT
         )
     """)
     conn.commit()
@@ -52,6 +58,13 @@ def main_menu():
     )
 
 
+def content_keyboard(code):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎥 ویدیو", callback_data=f"content:video:{code}")],
+        [InlineKeyboardButton("📄 جزوه", callback_data=f"content:jozve:{code}")]
+    ])
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_state.pop(update.effective_chat.id, None)
     await update.message.reply_text(
@@ -63,10 +76,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    user_state[chat_id] = "awaiting_code"
-    await update.message.reply_text(
-        "🪪 کد اختصاصی‌ای که در اختیارت قرار گرفته رو بفرست."
-    )
+
+    conn = sqlite3.connect("students.db")
+    row = conn.execute("SELECT code FROM students WHERE telegram_id = ?", (chat_id,)).fetchone()
+    conn.close()
+
+    if row:
+        await update.message.reply_text(
+            "به پنلت خوش اومدی 👋 یکی از گزینه‌ها رو انتخاب کن:",
+            reply_markup=content_keyboard(row[0])
+        )
+    else:
+        user_state[chat_id] = "awaiting_code"
+        await update.message.reply_text(
+            "🪪 کد اختصاصی‌ای که در اختیارت قرار گرفته رو بفرست."
+        )
 
 
 async def on_message_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -80,7 +104,7 @@ async def on_message_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def process_code(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, code: str):
     conn = sqlite3.connect("students.db")
     cur = conn.cursor()
-    cur.execute("SELECT content FROM codes WHERE code = ?", (code,))
+    cur.execute("SELECT code FROM codes WHERE code = ?", (code,))
     row = cur.fetchone()
 
     if not row:
@@ -88,15 +112,54 @@ async def process_code(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_
         await update.message.reply_text("❌ کد واردشده معتبر نیست.")
         return
 
-    content = row[0]
     cur.execute(
-        "INSERT OR REPLACE INTO students (code, telegram_id, registered_at) VALUES (?, ?, datetime('now'))",
-        (code, chat_id)
+        "INSERT OR REPLACE INTO students (telegram_id, code, registered_at) VALUES (?, ?, datetime('now'))",
+        (chat_id, code)
     )
     conn.commit()
     conn.close()
 
-    await update.message.reply_text(f"✅ کد تأیید شد، خوش اومدی!\n\n{content}")
+    await update.message.reply_text("🎉 عضویت با موفقیت انجام شد! خوش اومدی 🛡")
+    await update.message.reply_text(
+        "یکی از گزینه‌ها رو انتخاب کن:",
+        reply_markup=content_keyboard(code)
+    )
+
+
+async def deliver_content(chat_id, file_id, ftype, context: ContextTypes.DEFAULT_TYPE):
+    if ftype == "video":
+        await context.bot.send_video(chat_id=chat_id, video=file_id)
+    elif ftype == "photo":
+        await context.bot.send_photo(chat_id=chat_id, photo=file_id)
+    else:
+        await context.bot.send_document(chat_id=chat_id, document=file_id)
+
+
+async def handle_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    _, kind, code = query.data.split(":", 2)
+    chat_id = query.message.chat_id
+
+    conn = sqlite3.connect("students.db")
+    row = conn.execute(
+        "SELECT video_file_id, video_type, jozve_file_id, jozve_type FROM codes WHERE code = ?", (code,)
+    ).fetchone()
+    conn.close()
+
+    if not row:
+        await query.message.reply_text("این کد دیگه معتبر نیست.")
+        return
+
+    video_id, video_type, jozve_id, jozve_type = row
+    file_id, ftype = (video_id, video_type) if kind == "video" else (jozve_id, jozve_type)
+
+    if not file_id:
+        await query.message.reply_text("هنوز فایلی برای این بخش آپلود نشده.")
+        return
+
+    await deliver_content(chat_id, file_id, ftype, context)
 
 
 async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
@@ -120,10 +183,8 @@ async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, c
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """همه پیام‌های متنی که دکمه منو نیستن، از اینجا رد میشن."""
     chat_id = update.effective_chat.id
 
-    # پاسخ ادمین به یه پیام فوروارد شده (ریپلای)
     if chat_id == ADMIN_CHAT_ID and update.message.reply_to_message:
         replied_id = update.message.reply_to_message.message_id
         if replied_id in forward_map:
@@ -159,31 +220,91 @@ async def handle_seen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_reply_markup(reply_markup=None)
 
 
+# ============ دستورات ادمین ============
+
 async def add_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """فرمت: /addcode CODE   (فقط کد رو می‌سازه، فایل‌ها رو جدا اضافه می‌کنی)"""
     if update.effective_chat.id != ADMIN_CHAT_ID:
         return
-    if not context.args or len(context.args) < 2:
-        await update.message.reply_text("فرمت درست:\n/addcode کد محتوا-یا-لینک")
+    if not context.args:
+        await update.message.reply_text("فرمت درست:\n/addcode CODE")
         return
     code = context.args[0]
-    content = " ".join(context.args[1:])
     conn = sqlite3.connect("students.db")
-    conn.execute("INSERT OR REPLACE INTO codes (code, content) VALUES (?, ?)", (code, content))
+    conn.execute("INSERT OR IGNORE INTO codes (code) VALUES (?)", (code,))
     conn.commit()
     conn.close()
-    await update.message.reply_text(f"کد «{code}» ثبت شد ✅")
+    await update.message.reply_text(
+        f"کد «{code}» ساخته شد ✅\n"
+        f"حالا برای اضافه‌کردن فایل بفرست:\n"
+        f"/setvideo {code}\nیا\n/setjozve {code}"
+    )
+
+
+async def set_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_CHAT_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("فرمت درست:\n/setvideo CODE")
+        return
+    code = context.args[0]
+    admin_upload_state["pending"] = ("video", code)
+    await update.message.reply_text(f"فایل ویدیوی مربوط به کد «{code}» رو الان بفرست.")
+
+
+async def set_jozve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_CHAT_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("فرمت درست:\n/setjozve CODE")
+        return
+    code = context.args[0]
+    admin_upload_state["pending"] = ("jozve", code)
+    await update.message.reply_text(f"فایل جزوه‌ی مربوط به کد «{code}» رو الان بفرست.")
+
+
+async def handle_admin_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_CHAT_ID:
+        return
+    pending = admin_upload_state.get("pending")
+    if not pending:
+        return
+
+    kind, code = pending
+
+    if update.message.video:
+        file_id, ftype = update.message.video.file_id, "video"
+    elif update.message.document:
+        file_id, ftype = update.message.document.file_id, "document"
+    elif update.message.photo:
+        file_id, ftype = update.message.photo[-1].file_id, "photo"
+    else:
+        await update.message.reply_text("این نوع فایل پشتیبانی نمیشه، یه ویدیو/عکس/سند بفرست.")
+        return
+
+    column_file = "video_file_id" if kind == "video" else "jozve_file_id"
+    column_type = "video_type" if kind == "video" else "jozve_type"
+
+    conn = sqlite3.connect("students.db")
+    conn.execute(f"UPDATE codes SET {column_file} = ?, {column_type} = ? WHERE code = ?", (file_id, ftype, code))
+    conn.commit()
+    conn.close()
+
+    admin_upload_state["pending"] = None
+    label = "ویدیو" if kind == "video" else "جزوه"
+    await update.message.reply_text(f"فایل {label} برای کد «{code}» ثبت شد ✅")
 
 
 async def list_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ADMIN_CHAT_ID:
         return
     conn = sqlite3.connect("students.db")
-    rows = conn.execute("SELECT code, content FROM codes").fetchall()
+    rows = conn.execute("SELECT code, video_file_id, jozve_file_id FROM codes").fetchall()
     conn.close()
     if not rows:
         await update.message.reply_text("هیچ کدی ثبت نشده.")
         return
-    text = "\n".join([f"• {c} → {t[:40]}" for c, t in rows])
+    text = "\n".join([f"• {c} — 🎥{'✓' if v else '✗'} 📄{'✓' if j else '✗'}" for c, v, j in rows])
     await update.message.reply_text(text)
 
 
@@ -193,8 +314,16 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("addcode", add_code))
+    app.add_handler(CommandHandler("setvideo", set_video))
+    app.add_handler(CommandHandler("setjozve", set_jozve))
     app.add_handler(CommandHandler("codes", list_codes))
     app.add_handler(CallbackQueryHandler(handle_seen, pattern="^seen:"))
+    app.add_handler(CallbackQueryHandler(handle_content, pattern="^content:"))
+
+    app.add_handler(MessageHandler(
+        (filters.VIDEO | filters.Document.ALL | filters.PHOTO) & filters.User(ADMIN_CHAT_ID),
+        handle_admin_file
+    ))
 
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_PANEL}$"), on_panel_button))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_MESSAGE}$"), on_message_button))
