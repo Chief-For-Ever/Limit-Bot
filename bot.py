@@ -18,6 +18,9 @@ logging.basicConfig(level=logging.INFO)
 
 BTN_PANEL = "🪪 پنل کاربری"
 BTN_MESSAGE = "💬 ارسال پیام"
+BTN_VIDEO = "🎥 ویدیو"
+BTN_JOZVE = "📄 جزوه"
+BTN_BACK = "🔙 بازگشت"
 
 # وضعیت فعلی هر کاربر عادی: None / 'awaiting_code' / 'awaiting_message'
 user_state = {}
@@ -58,11 +61,19 @@ def main_menu():
     )
 
 
-def content_keyboard(code):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎥 ویدیو", callback_data=f"content:video:{code}")],
-        [InlineKeyboardButton("📄 جزوه", callback_data=f"content:jozve:{code}")]
-    ])
+def content_menu():
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton(text=BTN_VIDEO), KeyboardButton(text=BTN_JOZVE)],
+         [KeyboardButton(text=BTN_BACK)]],
+        resize_keyboard=True
+    )
+
+
+def get_student_code(chat_id):
+    conn = sqlite3.connect("students.db")
+    row = conn.execute("SELECT code FROM students WHERE telegram_id = ?", (chat_id,)).fetchone()
+    conn.close()
+    return row[0] if row else None
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -74,17 +85,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def on_back_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_state.pop(update.effective_chat.id, None)
+    await update.message.reply_text("منوی اصلی:", reply_markup=main_menu())
+
+
 async def on_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    code = get_student_code(chat_id)
 
-    conn = sqlite3.connect("students.db")
-    row = conn.execute("SELECT code FROM students WHERE telegram_id = ?", (chat_id,)).fetchone()
-    conn.close()
-
-    if row:
+    if code:
         await update.message.reply_text(
             "به پنلت خوش اومدی 👋 یکی از گزینه‌ها رو انتخاب کن:",
-            reply_markup=content_keyboard(row[0])
+            reply_markup=content_menu()
         )
     else:
         user_state[chat_id] = "awaiting_code"
@@ -122,7 +135,7 @@ async def process_code(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_
     await update.message.reply_text("🎉 عضویت با موفقیت انجام شد! خوش اومدی 🛡")
     await update.message.reply_text(
         "یکی از گزینه‌ها رو انتخاب کن:",
-        reply_markup=content_keyboard(code)
+        reply_markup=content_menu()
     )
 
 
@@ -135,12 +148,13 @@ async def deliver_content(chat_id, file_id, ftype, context: ContextTypes.DEFAULT
         await context.bot.send_document(chat_id=chat_id, document=file_id)
 
 
-async def handle_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+async def send_kind(update: Update, context: ContextTypes.DEFAULT_TYPE, kind: str):
+    chat_id = update.effective_chat.id
+    code = get_student_code(chat_id)
 
-    _, kind, code = query.data.split(":", 2)
-    chat_id = query.message.chat_id
+    if not code:
+        await update.message.reply_text("اول باید از «پنل کاربری» کدت رو ثبت کنی.")
+        return
 
     conn = sqlite3.connect("students.db")
     row = conn.execute(
@@ -149,17 +163,25 @@ async def handle_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not row:
-        await query.message.reply_text("این کد دیگه معتبر نیست.")
+        await update.message.reply_text("این کد دیگه معتبر نیست.")
         return
 
     video_id, video_type, jozve_id, jozve_type = row
     file_id, ftype = (video_id, video_type) if kind == "video" else (jozve_id, jozve_type)
 
     if not file_id:
-        await query.message.reply_text("هنوز فایلی برای این بخش آپلود نشده.")
+        await update.message.reply_text("هنوز فایلی برای این بخش آپلود نشده.")
         return
 
     await deliver_content(chat_id, file_id, ftype, context)
+
+
+async def on_video_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_kind(update, context, "video")
+
+
+async def on_jozve_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_kind(update, context, "jozve")
 
 
 async def forward_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
@@ -223,7 +245,7 @@ async def handle_seen(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============ دستورات ادمین ============
 
 async def add_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """فرمت: /addcode CODE   (فقط کد رو می‌سازه، فایل‌ها رو جدا اضافه می‌کنی)"""
+    """فرمت: /addcode CODE  — بعدش خودش پشت سر هم ویدیو و جزوه رو ازت می‌خواد."""
     if update.effective_chat.id != ADMIN_CHAT_ID:
         return
     if not context.args:
@@ -234,10 +256,10 @@ async def add_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.execute("INSERT OR IGNORE INTO codes (code) VALUES (?)", (code,))
     conn.commit()
     conn.close()
+
+    admin_upload_state["pending"] = ("video", code)
     await update.message.reply_text(
-        f"کد «{code}» ساخته شد ✅\n"
-        f"حالا برای اضافه‌کردن فایل بفرست:\n"
-        f"/setvideo {code}\nیا\n/setjozve {code}"
+        f"کد «{code}» ساخته شد ✅\nحالا فایل ویدیوی مربوطه رو بفرست."
     )
 
 
@@ -290,9 +312,40 @@ async def handle_admin_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    admin_upload_state["pending"] = None
-    label = "ویدیو" if kind == "video" else "جزوه"
-    await update.message.reply_text(f"فایل {label} برای کد «{code}» ثبت شد ✅")
+    if kind == "video":
+        admin_upload_state["pending"] = ("jozve", code)
+        await update.message.reply_text("فایل ویدیو ثبت شد ✅\nحالا فایل جزوه رو بفرست.")
+    else:
+        admin_upload_state["pending"] = None
+        await update.message.reply_text(f"فایل جزوه هم ثبت شد ✅\nکد «{code}» کامل آماده‌ست.")
+
+
+async def del_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """فرمت: /delcode CODE"""
+    if update.effective_chat.id != ADMIN_CHAT_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("فرمت درست:\n/delcode CODE")
+        return
+    code = context.args[0]
+    conn = sqlite3.connect("students.db")
+    conn.execute("DELETE FROM codes WHERE code = ?", (code,))
+    conn.execute("DELETE FROM students WHERE code = ?", (code,))
+    conn.commit()
+    conn.close()
+    await update.message.reply_text(f"کد «{code}» و دسترسی دانش‌آموزهای مرتبط باهاش حذف شد ✅")
+
+
+async def del_all_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حذف همه کدها و همه دانش‌آموزهای ثبت‌شده."""
+    if update.effective_chat.id != ADMIN_CHAT_ID:
+        return
+    conn = sqlite3.connect("students.db")
+    conn.execute("DELETE FROM codes")
+    conn.execute("DELETE FROM students")
+    conn.commit()
+    conn.close()
+    await update.message.reply_text("همه کدها و دانش‌آموزهای ثبت‌شده حذف شدند ✅")
 
 
 async def list_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -316,9 +369,10 @@ def main():
     app.add_handler(CommandHandler("addcode", add_code))
     app.add_handler(CommandHandler("setvideo", set_video))
     app.add_handler(CommandHandler("setjozve", set_jozve))
+    app.add_handler(CommandHandler("delcode", del_code))
+    app.add_handler(CommandHandler("delallcodes", del_all_codes))
     app.add_handler(CommandHandler("codes", list_codes))
     app.add_handler(CallbackQueryHandler(handle_seen, pattern="^seen:"))
-    app.add_handler(CallbackQueryHandler(handle_content, pattern="^content:"))
 
     app.add_handler(MessageHandler(
         (filters.VIDEO | filters.Document.ALL | filters.PHOTO) & filters.User(ADMIN_CHAT_ID),
@@ -327,6 +381,9 @@ def main():
 
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_PANEL}$"), on_panel_button))
     app.add_handler(MessageHandler(filters.Regex(f"^{BTN_MESSAGE}$"), on_message_button))
+    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_VIDEO}$"), on_video_button))
+    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_JOZVE}$"), on_jozve_button))
+    app.add_handler(MessageHandler(filters.Regex(f"^{BTN_BACK}$"), on_back_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     print("بات روشن شد...")
