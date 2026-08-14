@@ -550,7 +550,7 @@ async def admin_del_group_start(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def admin_del_all_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin_flow["step"] = "dc_all_confirm1"
-await update.message.reply_text("⚠️ این کار تمام کدها و دانش‌آموزها رو حذف می‌کنه و قابل بازگشت نیست.\nبرای ادامه دقیقاً بنویس: تایید")
+    await update.message.reply_text("⚠️ این کار تمام کدها و دانش‌آموزها رو حذف می‌کنه و قابل بازگشت نیست.\nبرای ادامه دقیقاً بنویس: تایید")
         
 
 
