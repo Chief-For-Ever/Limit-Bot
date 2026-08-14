@@ -113,10 +113,12 @@ def reset_admin_flow():
 
 def compute_expiry():
     today = jdatetime.date.today()
-    if today.month >= 6:
-        expiry = jdatetime.date(today.year + 1, 4, 1)
-    else:
+    # اگر هنوز به ۱ تیر همین سال نرسیده‌ایم (فروردین/اردیبهشت/خرداد)، انقضا همون تیر امسال است.
+    # در غیر این صورت (تیر تا اسفند)، ۱ تیر امسال گذشته، پس انقضا تیر سال بعد است.
+    if today.month <= 3:
         expiry = jdatetime.date(today.year, 4, 1)
+    else:
+        expiry = jdatetime.date(today.year + 1, 4, 1)
     return expiry.togregorian().isoformat()
 
 
